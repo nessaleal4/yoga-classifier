@@ -103,42 +103,63 @@ def load_models():
     models = {}
     model_info = {}
     
-    # Try to load models (you'll need to adjust paths based on your setup)
+    # Check for models in current directory first, then models subdirectory
+    possible_paths = [".", "models"]
+    
     model_configs = {
         "VGG16 Transfer": {
-            "path": "models/vgg16_model.h5",
+            "files": ["vgg16_model.h5", "best_yoga_model_vgg16.h5"],
             "description": "VGG16 with transfer learning - Great for detailed feature detection",
             "params": "138M parameters"
         },
         "ResNet50 Transfer": {
-            "path": "models/resnet50_model.h5", 
+            "files": ["resnet50_model.h5", "best_yoga_model_resnet50.h5"], 
             "description": "ResNet50 with skip connections - Excellent for complex poses",
             "params": "25M parameters"
         },
         "EfficientNetB0 Transfer": {
-            "path": "models/efficientnetb0_model.h5",
+            "files": ["efficientnetb0_model.h5", "best_yoga_model_efficientnetb0.h5"],
             "description": "EfficientNet - Optimized for speed and accuracy",
             "params": "5M parameters"
+        },
+        "Best Overall Model": {
+            "files": ["best_overall_model.h5", "best_yoga_model.h5"],
+            "description": "Best performing model from training",
+            "params": "Optimized parameters"
         }
     }
     
+    # Try to find and load models
     for name, config in model_configs.items():
-        try:
-            if os.path.exists(config["path"]):
-                models[name] = tf.keras.models.load_model(config["path"])
-                model_info[name] = config
-                st.success(f"✅ Loaded {name}")
-            else:
-                st.warning(f"⚠️ Model file not found: {config['path']}")
-        except Exception as e:
-            st.error(f"❌ Error loading {name}: {str(e)}")
+        model_loaded = False
+        
+        for base_path in possible_paths:
+            if model_loaded:
+                break
+                
+            for model_file in config["files"]:
+                model_path = os.path.join(base_path, model_file)
+                
+                if os.path.exists(model_path):
+                    try:
+                        models[name] = tf.keras.models.load_model(model_path)
+                        model_info[name] = config
+                        st.success(f"✅ Loaded {name} from {model_path}")
+                        model_loaded = True
+                        break
+                    except Exception as e:
+                        st.warning(f"⚠️ Error loading {model_path}: {str(e)}")
+        
+        if not model_loaded:
+            st.info(f"📝 {name} not found. Expected files: {config['files']}")
     
-    # If no models found, create a dummy for demo
+    # If no models found, create a demo model
     if not models:
-        st.info("📝 No model files found. Using demo mode.")
+        st.warning("⚠️ No model files found. Using demo mode.")
+        st.info("💡 To use real models, place your .h5 files in the current directory or 'models/' folder")
         models["Demo Model"] = None
         model_info["Demo Model"] = {
-            "description": "Demo model for testing UI",
+            "description": "Demo model for testing UI (generates random predictions)",
             "params": "Demo parameters"
         }
     
@@ -148,15 +169,40 @@ def load_models():
 def load_class_names():
     """Load yoga pose class names"""
     try:
+        # Try to load from JSON first
         with open('class_names.json', 'r') as f:
             return json.load(f)
     except:
-        # Default yoga poses if file not found
-        return [
-            "Chair", "Cobra", "Dog", "Downdog", "Mountain", "Plank", 
-            "Seiza", "Shavasana", "Sukhasana", "Tree", "Triangle", 
-            "Warrior1", "Warrior2", "Warrior3"
-        ]
+        try:
+            # Try to load from config.json
+            with open('config.json', 'r') as f:
+                config = json.load(f)
+                return config.get('class_names', [])
+        except:
+            # Parse from the yoga poses text file
+            try:
+                class_names = []
+                with open('yoga-poses-english.txt', 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                for line in lines[:20]:  # Take first 20 poses
+                    line = line.strip()
+                    if line and ' - ' in line:
+                        pose_name = line.split(' - ')[1].split()[0]  # Take first word after dash
+                        class_names.append(pose_name)
+                
+                return class_names if class_names else [
+                    "Chair", "Cobra", "Dog", "Downdog", "Mountain", "Plank", 
+                    "Seiza", "Shavasana", "Sukhasana", "Tree", "Triangle", 
+                    "Warrior1", "Warrior2", "Warrior3"
+                ]
+            except:
+                # Ultimate fallback
+                return [
+                    "Chair", "Cobra", "Dog", "Downdog", "Mountain", "Plank", 
+                    "Seiza", "Shavasana", "Sukhasana", "Tree", "Triangle", 
+                    "Warrior1", "Warrior2", "Warrior3"
+                ]
 
 def preprocess_image(image, target_size=(224, 224)):
     """Preprocess uploaded image for model prediction"""
