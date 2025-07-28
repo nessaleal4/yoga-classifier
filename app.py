@@ -1,5 +1,4 @@
-# app.py - Streamlit Web Application for Yoga Pose Classification
-# Ready for GitHub deployment
+# app.py - Modified version with Google Drive model loading
 
 import streamlit as st
 import tensorflow as tf
@@ -15,8 +14,9 @@ import json
 import os
 import time
 from datetime import datetime
-import base64
-import io
+import requests
+from pathlib import Path
+import gdown  # Better for Google Drive downloads
 
 # Page configuration
 st.set_page_config(
@@ -26,7 +26,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS (same as before)
 st.markdown("""
 <style>
     .main {
@@ -60,50 +60,95 @@ st.markdown("""
 if 'predictions_history' not in st.session_state:
     st.session_state.predictions_history = []
 
-@st.cache_resource
-def load_models():
-    """Load all available models"""
-    models = {}
-    model_info = {}
+@st.cache_resource(show_spinner=False)
+def download_models_from_drive():
+    """Download models from Google Drive if not present"""
     
-    # Define model configurations
+    # REPLACE THESE WITH YOUR ACTUAL GOOGLE DRIVE FILE IDs
+    # To get file ID: 
+    # 1. Upload file to Google Drive
+    # 2. Right-click -> Get shareable link
+    # 3. Extract ID from: https://drive.google.com/file/d/FILE_ID/view?usp=sharing 
+    
     model_configs = {
         'VGG16': {
-            'file': 'models/vgg16_yoga_model.h5',
-            'quantized_file': 'models/vgg16_yoga_quantized.tflite',
+            'filename': 'vgg16_yoga_model.h5',
+            'gdrive_id': '1uLrfi8CFBtaCZOcvjKh4UO94vQCN8j3f',  
             'preprocess': vgg16.preprocess_input,
             'input_size': (224, 224),
             'description': 'VGG16 fine-tuned on yoga poses. Good balance of accuracy and speed.'
         },
         'ResNet50': {
-            'file': 'models/resnet50_yoga_model.h5',
-            'quantized_file': 'models/resnet50_yoga_quantized.tflite',
+            'filename': 'resnet50_yoga_model.h5',
+            'gdrive_id': '1ODRF_RVTx0XhYB7bQD3ckuBdSNQaDUnu',  
             'preprocess': resnet50.preprocess_input,
             'input_size': (224, 224),
             'description': 'ResNet50 with residual connections. Best accuracy, slower inference.'
         },
         'EfficientNetB0': {
-            'file': 'models/efficientnetb0_yoga_model.h5',
-            'quantized_file': 'models/efficientnetb0_yoga_quantized.tflite',
+            'filename': 'efficientnetb0_yoga_model.h5',
+            'gdrive_id': '1o5XAk__ebRV1qgvrICERMiWvBgUCzg3k',  
             'preprocess': efficientnet.preprocess_input,
             'input_size': (224, 224),
             'description': 'EfficientNet-B0 optimized for mobile. Fastest inference.'
         }
     }
     
-    # Load models
-    for model_name, config in model_configs.items():
+    # Create models directory
+    models_dir = Path('models')
+    models_dir.mkdir(exist_ok=True)
+    
+    models = {}
+    model_info = {}
+    
+    # Download progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, (model_name, config) in enumerate(model_configs.items()):
+        filepath = models_dir / config['filename']
+        
+        # Download if not exists
+        if not filepath.exists():
+            status_text.text(f'📥 Downloading {model_name} model...')
+            try:
+                # Method 1: Using gdown (more reliable)
+                url = f"https://drive.google.com/uc?id={config['gdrive_id']}"
+                gdown.download(url, str(filepath), quiet=False)
+                
+                # Method 2: Direct download (backup)
+                # url = f"https://drive.google.com/uc?export=download&id={config['gdrive_id']}"
+                # response = requests.get(url, stream=True)
+                # with open(filepath, 'wb') as f:
+                #     for chunk in response.iter_content(chunk_size=1024*1024):
+                #         if chunk:
+                #             f.write(chunk)
+                
+                st.success(f'✅ Downloaded {model_name}')
+            except Exception as e:
+                st.error(f'❌ Failed to download {model_name}: {str(e)}')
+                st.info(f'Please manually download from: https://drive.google.com/file/d/{config["gdrive_id"]}/view')
+                continue
+        
+        # Load model
         try:
-            if os.path.exists(config['file']):
-                models[model_name] = load_model(config['file'])
-                model_info[model_name] = config
-                print(f"✅ Loaded {model_name}")
-            else:
-                print(f"⚠️ {model_name} model file not found")
+            status_text.text(f'📦 Loading {model_name} model...')
+            models[model_name] = load_model(str(filepath))
+            model_info[model_name] = config
+            st.success(f'✅ Loaded {model_name}')
         except Exception as e:
-            print(f"❌ Error loading {model_name}: {e}")
+            st.error(f'❌ Failed to load {model_name}: {str(e)}')
+        
+        progress_bar.progress((i + 1) / len(model_configs))
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
     
     return models, model_info
+
+# Rest of your app.py code remains the same...
+# Just replace the download_models_from_drive() function with download_models_from_drive()
 
 @st.cache_data
 def load_class_names():
@@ -116,113 +161,8 @@ def load_class_names():
         return [
             "Downdog", "Goddess", "Plank", "Tree", "Warrior1", "Warrior2",
             "Chair", "Cobra", "Crow", "HalfMoon", "Triangle", "Bridge",
-            "Child", "Mountain", "Pigeon", "Camel", "BoatPose", "BowPose"
+            # Add all 107 classes here
         ]
-
-def load_quantized_model(model_path):
-    """Load TFLite quantized model"""
-    interpreter = tf.lite.Interpreter(model_path=model_path)
-    interpreter.allocate_tensors()
-    return interpreter
-
-def predict_with_quantized_model(interpreter, img_array):
-    """Make prediction with quantized model"""
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-    
-    # Set input tensor
-    interpreter.set_tensor(input_details[0]['index'], img_array)
-    
-    # Run inference
-    interpreter.invoke()
-    
-    # Get output
-    predictions = interpreter.get_tensor(output_details[0]['index'])
-    return predictions[0]
-
-def preprocess_image(img, target_size, preprocess_fn):
-    """Preprocess image for model input"""
-    # Resize image
-    img = img.resize(target_size, Image.Resampling.LANCZOS)
-    
-    # Convert to array
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    
-    # Apply model-specific preprocessing
-    img_array = preprocess_fn(img_array)
-    
-    return img_array
-
-def make_prediction(model, img_array, model_type='keras'):
-    """Make prediction with timing"""
-    start_time = time.time()
-    
-    if model_type == 'tflite':
-        predictions = predict_with_quantized_model(model, img_array)
-    else:
-        predictions = model.predict(img_array, verbose=0)[0]
-    
-    inference_time = (time.time() - start_time) * 1000  # Convert to ms
-    
-    return predictions, inference_time
-
-def plot_predictions(predictions, class_names, top_k=5):
-    """Create interactive plot of top predictions"""
-    # Get top k predictions
-    top_indices = np.argsort(predictions)[-top_k:][::-1]
-    top_probs = predictions[top_indices]
-    top_classes = [class_names[i] for i in top_indices]
-    
-    # Create horizontal bar chart
-    fig = go.Figure(data=[
-        go.Bar(
-            x=top_probs,
-            y=top_classes,
-            orientation='h',
-            text=[f'{prob:.1%}' for prob in top_probs],
-            textposition='auto',
-            marker_color=['#1e3d59' if i == 0 else '#3e92cc' for i in range(len(top_probs))]
-        )
-    ])
-    
-    fig.update_layout(
-        title=f'Top {top_k} Predictions',
-        xaxis_title='Confidence',
-        yaxis_title='Yoga Pose',
-        xaxis=dict(tickformat='.0%', range=[0, 1]),
-        height=400,
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    
-    return fig
-
-def create_confidence_gauge(confidence):
-    """Create a gauge chart for prediction confidence"""
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=confidence * 100,
-        domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': "Confidence"},
-        number={'suffix': "%"},
-        gauge={
-            'axis': {'range': [None, 100]},
-            'bar': {'color': "#1e3d59"},
-            'steps': [
-                {'range': [0, 50], 'color': "#ffd23f"},
-                {'range': [50, 80], 'color': "#3e92cc"},
-                {'range': [80, 100], 'color': "#0a9396"}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 90
-            }
-        }
-    ))
-    
-    fig.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=20))
-    return fig
 
 # Main app
 def main():
@@ -239,7 +179,7 @@ def main():
         st.header("⚙️ Model Settings")
         
         # Load models
-        models, model_info = load_models()
+        models, model_info = download_models_from_drive()
         class_names = load_class_names()
         
         if not models:
