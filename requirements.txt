@@ -1,7 +1,7 @@
 streamlit==1.28.1
-pillow
-pandas
+pillow==10.0.1
+pandas==2.1.1
+numpy>=1.26.0
+tensorflow==2.15.0
 plotly
-numpy
 gdown
-tensorflow
