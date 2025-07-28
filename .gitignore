@@ -1,0 +1,8 @@
+# Model files (hosted on Google Drive)
+*.h5
+*.hdf5
+models/
+
+# Python
+__pycache__/
+*.py[cod]
