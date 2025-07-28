@@ -1,10 +1,7 @@
-# app.py - Complete working version for Streamlit Cloud
+# app.py - ONNX Runtime version for Python 3.13 compatibility
 
 import streamlit as st
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications import vgg16, resnet50, efficientnet
+import onnxruntime as ort
 import numpy as np
 from PIL import Image
 import plotly.graph_objects as go
@@ -14,9 +11,8 @@ import json
 import os
 import time
 from datetime import datetime
-import requests
-from pathlib import Path
 import gdown
+from pathlib import Path
 
 # Page configuration
 st.set_page_config(
@@ -63,22 +59,60 @@ if 'predictions_history' not in st.session_state:
     st.session_state.predictions_history = []
 
 # Helper functions
-def preprocess_image(img, target_size, preprocess_fn):
-    """Preprocess image for model input"""
+def preprocess_image_vgg(img, target_size=(224, 224)):
+    """Preprocess image for VGG16 style models"""
     img = img.resize(target_size)
-    img_array = image.img_to_array(img)
+    img_array = np.array(img).astype(np.float32)
+    
+    # VGG16 preprocessing: subtract mean RGB values
+    img_array[:, :, 0] -= 103.939
+    img_array[:, :, 1] -= 116.779
+    img_array[:, :, 2] -= 123.68
+    
+    # Add batch dimension
     img_array = np.expand_dims(img_array, axis=0)
-    img_array = preprocess_fn(img_array)
     return img_array
 
-def make_prediction(model, img_array, model_type='keras'):
-    """Make prediction with the model"""
+def preprocess_image_resnet(img, target_size=(224, 224)):
+    """Preprocess image for ResNet style models"""
+    img = img.resize(target_size)
+    img_array = np.array(img).astype(np.float32)
+    
+    # ResNet preprocessing: scale to [-1, 1]
+    img_array = (img_array - 127.5) / 127.5
+    
+    # Add batch dimension
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
+
+def preprocess_image_efficientnet(img, target_size=(224, 224)):
+    """Preprocess image for EfficientNet style models"""
+    img = img.resize(target_size)
+    img_array = np.array(img).astype(np.float32)
+    
+    # EfficientNet preprocessing: scale to [0, 1]
+    img_array = img_array / 255.0
+    
+    # Add batch dimension
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
+
+def make_prediction(session, img_array):
+    """Make prediction with ONNX model"""
     start_time = time.time()
     
-    predictions = model.predict(img_array, verbose=0)
+    # Get input name
+    input_name = session.get_inputs()[0].name
+    
+    # Run inference
+    outputs = session.run(None, {input_name: img_array})
+    predictions = outputs[0][0]  # Get first batch, first output
+    
+    # Apply softmax if needed
+    predictions = np.exp(predictions) / np.sum(np.exp(predictions))
     
     inference_time = (time.time() - start_time) * 1000  # Convert to ms
-    return predictions[0], inference_time
+    return predictions, inference_time
 
 def create_confidence_gauge(confidence):
     """Create a gauge chart for confidence visualization"""
@@ -140,27 +174,32 @@ def plot_predictions(predictions, class_names, top_k=5):
 
 @st.cache_resource(show_spinner=False)
 def download_models_from_drive():
-    """Download models from Google Drive if not present"""
+    """Download ONNX models from Google Drive if not present"""
+    
+    # NOTE: You'll need to convert your .h5 models to .onnx format
+    # You can use tf2onnx for conversion:
+    # pip install tf2onnx
+    # python -m tf2onnx.convert --saved-model path/to/saved_model --output model.onnx
     
     model_configs = {
         'VGG16': {
-            'filename': 'vgg16_yoga_model.h5',
-            'gdrive_id': '1uLrfi8CFBtaCZOcvjKh4UO94vQCN8j3f',  
-            'preprocess': vgg16.preprocess_input,
+            'filename': 'vgg16_yoga_model.onnx',
+            'gdrive_id': 'YOUR_ONNX_MODEL_GDRIVE_ID',  # Update this
+            'preprocess': preprocess_image_vgg,
             'input_size': (224, 224),
             'description': 'VGG16 fine-tuned on yoga poses. Good balance of accuracy and speed.'
         },
         'ResNet50': {
-            'filename': 'resnet50_yoga_model.h5',
-            'gdrive_id': '1ODRF_RVTx0XhYB7bQD3ckuBdSNQaDUnu',  
-            'preprocess': resnet50.preprocess_input,
+            'filename': 'resnet50_yoga_model.onnx',
+            'gdrive_id': 'YOUR_ONNX_MODEL_GDRIVE_ID',  # Update this
+            'preprocess': preprocess_image_resnet,
             'input_size': (224, 224),
             'description': 'ResNet50 with residual connections. Best accuracy, slower inference.'
         },
         'EfficientNetB0': {
-            'filename': 'efficientnetb0_yoga_model.h5',
-            'gdrive_id': '1o5XAk__ebRV1qgvrICERMiWvBgUCzg3k',  
-            'preprocess': efficientnet.preprocess_input,
+            'filename': 'efficientnetb0_yoga_model.onnx',
+            'gdrive_id': 'YOUR_ONNX_MODEL_GDRIVE_ID',  # Update this
+            'preprocess': preprocess_image_efficientnet,
             'input_size': (224, 224),
             'description': 'EfficientNet-B0 optimized for mobile. Fastest inference.'
         }
@@ -170,44 +209,54 @@ def download_models_from_drive():
     models_dir = Path('models')
     models_dir.mkdir(exist_ok=True)
     
-    models = {}
+    sessions = {}
     model_info = {}
     
     # Download progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for i, (model_name, config) in enumerate(model_configs.items()):
-        filepath = models_dir / config['filename']
-        
-        # Download if not exists
-        if not filepath.exists():
-            status_text.text(f'📥 Downloading {model_name} model...')
-            try:
-                url = f"https://drive.google.com/uc?id={config['gdrive_id']}"
-                gdown.download(url, str(filepath), quiet=False)
-                st.success(f'✅ Downloaded {model_name}')
-            except Exception as e:
-                st.error(f'❌ Failed to download {model_name}: {str(e)}')
-                st.info(f'Please ensure the Google Drive file is set to "Anyone with the link can view"')
-                continue
-        
-        # Load model
-        try:
-            status_text.text(f'📦 Loading {model_name} model...')
-            models[model_name] = load_model(str(filepath))
+    # For demo purposes, create a dummy model if no real models
+    demo_mode = all(config['gdrive_id'].startswith('YOUR_') for config in model_configs.values())
+    
+    if demo_mode:
+        st.warning("⚠️ Demo mode: No real models configured. Using random predictions for demonstration.")
+        # Create dummy sessions that return random predictions
+        for model_name, config in model_configs.items():
+            sessions[model_name] = None  # We'll handle this in make_prediction
             model_info[model_name] = config
-            st.success(f'✅ Loaded {model_name}')
-        except Exception as e:
-            st.error(f'❌ Failed to load {model_name}: {str(e)}')
-        
-        progress_bar.progress((i + 1) / len(model_configs))
+    else:
+        for i, (model_name, config) in enumerate(model_configs.items()):
+            filepath = models_dir / config['filename']
+            
+            # Download if not exists
+            if not filepath.exists() and not config['gdrive_id'].startswith('YOUR_'):
+                status_text.text(f'📥 Downloading {model_name} model...')
+                try:
+                    url = f"https://drive.google.com/uc?id={config['gdrive_id']}"
+                    gdown.download(url, str(filepath), quiet=False)
+                    st.success(f'✅ Downloaded {model_name}')
+                except Exception as e:
+                    st.error(f'❌ Failed to download {model_name}: {str(e)}')
+                    continue
+            
+            # Load ONNX model
+            if filepath.exists():
+                try:
+                    status_text.text(f'📦 Loading {model_name} model...')
+                    sessions[model_name] = ort.InferenceSession(str(filepath))
+                    model_info[model_name] = config
+                    st.success(f'✅ Loaded {model_name}')
+                except Exception as e:
+                    st.error(f'❌ Failed to load {model_name}: {str(e)}')
+            
+            progress_bar.progress((i + 1) / len(model_configs))
     
     # Clear progress indicators
     progress_bar.empty()
     status_text.empty()
     
-    return models, model_info
+    return sessions, model_info, demo_mode
 
 @st.cache_data
 def load_class_names():
@@ -216,7 +265,7 @@ def load_class_names():
         with open('class_names.json', 'r') as f:
             return json.load(f)
     except:
-        # Fallback to hardcoded class names if file not found
+        # Fallback to hardcoded class names
         return [
             "Eight-Limbed", "Cat-Cow", "One-Legged King Pigeon", "Side-Reclining Leg Lift",
             "Pigeon", "Monkey", "Gate", "Marichi's", "Firefly", "Head-to-Knee Forward Bend",
@@ -257,17 +306,17 @@ def main():
         st.header("⚙️ Model Settings")
         
         # Load models
-        models, model_info = download_models_from_drive()
+        sessions, model_info, demo_mode = download_models_from_drive()
         class_names = load_class_names()
         
-        if not models:
+        if not sessions and not demo_mode:
             st.error("No models found! Please ensure model files are accessible.")
             return
         
         # Model selection
         selected_model = st.selectbox(
             "Select Model",
-            list(models.keys()),
+            list(model_info.keys()),
             help="Choose which model to use for prediction"
         )
         
@@ -317,21 +366,22 @@ def main():
             if st.button("🔮 Classify Pose", type="primary"):
                 with st.spinner("Analyzing yoga pose..."):
                     try:
-                        # Get model and preprocessing function
-                        model = models[selected_model]
-                        
                         # Preprocess image
                         if show_preprocessing:
                             st.text("Preprocessing image...")
                         
-                        img_array = preprocess_image(
-                            img,
-                            model_info[selected_model]['input_size'],
-                            model_info[selected_model]['preprocess']
-                        )
+                        preprocess_fn = model_info[selected_model]['preprocess']
+                        img_array = preprocess_fn(img, model_info[selected_model]['input_size'])
                         
                         # Make prediction
-                        predictions, inference_time = make_prediction(model, img_array)
+                        if demo_mode:
+                            # Demo mode: generate random predictions
+                            predictions = np.random.rand(len(class_names))
+                            predictions = predictions / np.sum(predictions)
+                            inference_time = np.random.uniform(20, 50)
+                        else:
+                            session = sessions[selected_model]
+                            predictions, inference_time = make_prediction(session, img_array)
                         
                         # Get top prediction
                         top_idx = np.argmax(predictions)
@@ -400,7 +450,7 @@ def main():
     st.markdown(
         """
         <div style="text-align: center;">
-            <p>Built with ❤️ using Streamlit and TensorFlow</p>
+            <p>Built with ❤️ using Streamlit and ONNX Runtime</p>
             <p>Computer Vision Assignment - Yoga Pose Classification</p>
         </div>
         """,
