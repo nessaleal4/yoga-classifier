@@ -1,15 +1,14 @@
 # app.py - Demo version with simulated models for Python 3.13 compatibility
 
 import streamlit as st
-import numpy as np
-from PIL import Image
 import plotly.graph_objects as go
 import plotly.express as px
-import pandas as pd
-import json
 import time
 from datetime import datetime
 from pathlib import Path
+import random
+import base64
+from io import BytesIO
 
 # Page configuration
 st.set_page_config(
@@ -82,7 +81,7 @@ class DemoModel:
             self.confidence_boost = 0.06
             self.base_inference_time = 25
     
-    def predict(self, image_array):
+    def predict(self, image_bytes):
         """Generate realistic-looking predictions"""
         # Simulate processing time
         time.sleep(self.base_inference_time / 1000)
@@ -91,43 +90,36 @@ class DemoModel:
         num_classes = len(self.class_names)
         
         # Create base predictions
-        predictions = np.random.exponential(0.05, num_classes)
+        predictions = [random.random() * 0.1 for _ in range(num_classes)]
         
         # Pick a "winner" class based on image characteristics
         # (In real life, this would be based on actual features)
-        img_hash = hash(image_array.tobytes()) % num_classes
+        img_hash = hash(image_bytes) % num_classes
         
         # Boost the "winner" class
-        predictions[img_hash] += 0.7 + self.confidence_boost
+        predictions[img_hash] = 0.7 + self.confidence_boost + random.random() * 0.1
         
         # Add some runner-ups
         runner_up1 = (img_hash + 1) % num_classes
         runner_up2 = (img_hash + 2) % num_classes
-        predictions[runner_up1] += 0.15
-        predictions[runner_up2] += 0.08
+        predictions[runner_up1] = 0.15 + random.random() * 0.05
+        predictions[runner_up2] = 0.08 + random.random() * 0.03
         
         # Normalize to sum to 1 (softmax-like)
-        predictions = predictions / predictions.sum()
+        total = sum(predictions)
+        predictions = [p / total for p in predictions]
         
         return predictions
 
 # Helper functions
-def preprocess_image(img, target_size):
-    """Preprocess image for model input"""
-    img = img.resize(target_size)
-    img_array = np.array(img).astype(np.float32)
-    # Normalize to [0, 1]
-    img_array = img_array / 255.0
-    return img_array
-
-def make_prediction(model, img_array):
+def make_prediction(model, image_bytes):
     """Make prediction with the demo model"""
     start_time = time.time()
     
-    predictions = model.predict(img_array)
+    predictions = model.predict(image_bytes)
     
     # Add some random variation to inference time
-    inference_time = (time.time() - start_time) * 1000 + np.random.uniform(-5, 5)
+    inference_time = (time.time() - start_time) * 1000 + random.uniform(-5, 5)
     
     return predictions, max(inference_time, 10)  # Ensure positive time
 
@@ -159,19 +151,20 @@ def create_confidence_gauge(confidence):
 def plot_predictions(predictions, class_names, top_k=5):
     """Plot top K predictions as a bar chart"""
     # Get top k predictions
-    top_indices = np.argsort(predictions)[-top_k:][::-1]
-    top_probs = predictions[top_indices]
+    indices_and_probs = sorted(enumerate(predictions), key=lambda x: x[1], reverse=True)[:top_k]
+    top_indices = [idx for idx, _ in indices_and_probs]
+    top_probs = [prob for _, prob in indices_and_probs]
     top_labels = [class_names[i] for i in top_indices]
     
-    # Create dataframe
-    df = pd.DataFrame({
+    # Create data for plotly
+    data = {
         'Pose': top_labels,
-        'Confidence': top_probs * 100
-    })
+        'Confidence': [p * 100 for p in top_probs]
+    }
     
     # Create bar chart
     fig = px.bar(
-        df, 
+        data, 
         x='Confidence', 
         y='Pose', 
         orientation='h',
@@ -330,11 +323,14 @@ def main():
         
         if uploaded_file is not None:
             # Display uploaded image
-            img = Image.open(uploaded_file).convert('RGB')
-            st.image(img, caption="Uploaded Image", use_column_width=True)
+            st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+            
+            # Get image bytes
+            image_bytes = uploaded_file.read()
+            uploaded_file.seek(0)  # Reset file pointer
             
             # Show image info
-            st.caption(f"Image size: {img.size[0]}x{img.size[1]} pixels")
+            st.caption(f"File size: {len(image_bytes) / 1024:.1f} KB")
             
             # Predict button
             if st.button("🔮 Classify Pose", type="primary"):
@@ -349,16 +345,11 @@ def main():
                             st.text(f"Resizing to {model_configs[selected_model]['input_size']}")
                             st.text("Normalizing pixel values...")
                         
-                        img_array = preprocess_image(
-                            img,
-                            model_configs[selected_model]['input_size']
-                        )
-                        
                         # Make prediction
-                        predictions, inference_time = make_prediction(model, img_array)
+                        predictions, inference_time = make_prediction(model, image_bytes)
                         
                         # Get top prediction
-                        top_idx = np.argmax(predictions)
+                        top_idx = predictions.index(max(predictions))
                         top_class = class_names[top_idx]
                         top_prob = predictions[top_idx]
                         
